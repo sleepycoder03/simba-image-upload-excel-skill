@@ -12,3 +12,6 @@ Codex Skill：批量上传图片到 Simba，并将生成链接/素材 key 回填
 - `scripts/simba_excel_upload.py`
 - `references/quickstart.md`
 - `agents/openai.yaml`
+
+## 查询simba token方式
+- `在 Simba 页面打开开发者工具 Console执行：localStorage.getItem('token') || localStorage.getItem('token_test')`
