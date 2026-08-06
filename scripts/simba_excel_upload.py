@@ -65,7 +65,6 @@ def ensure_import(module_name: str, pip_name: Optional[str] = None):
         return importlib.import_module(module_name)
 
 
-# Lazily imported deps (with auto-install fallback)
 openpyxl = ensure_import("openpyxl")
 oss2 = ensure_import("oss2")
 
@@ -88,13 +87,9 @@ def to_file_name_like(text: str) -> str:
     s = normalize_text(text)
     if not s:
         return ""
-
     if is_http_url(s):
         p = urllib.parse.urlparse(s)
-        name = Path(p.path).name
-        return name or s
-
-    # treat as local path-ish text
+        return Path(p.path).name or s
     if "/" in s or "\\" in s:
         return Path(s).name
     return s
@@ -105,14 +100,8 @@ def normalize_name_key(text: str) -> str:
     if not s:
         return ""
     s = Path(s).stem
-
-    # remove leading rank prefix, e.g. 01_xxx / 1-xxx
     s = re.sub(r"^\s*0*\d+[_\-\s]+", "", s)
-
-    # remove common size suffix
     s = re.sub(r"(?i)[_\-\s]*(?:512x512|512x384|512x340|340x512|384x512)$", "", s)
-
-    # keep only alnum for robust matching (supports unicode letters/digits)
     return "".join(ch.lower() for ch in s if ch.isalnum())
 
 
@@ -172,18 +161,15 @@ def resolve_or_create_column(ws, spec: str, label: str, create_if_missing: bool 
     except SimbaError:
         if not create_if_missing:
             raise
-
         token = (spec or "").strip()
         if not token or token.isdigit() or re.fullmatch(r"[A-Za-z]{1,3}", token):
             raise
-
         new_col = ws.max_column + 1
         ws.cell(row=1, column=new_col, value=token)
         return new_col
 
 
 def cell_string(cell) -> str:
-    # Prefer hyperlink target when available.
     try:
         if cell.hyperlink and cell.hyperlink.target:
             return normalize_text(cell.hyperlink.target)
@@ -328,7 +314,6 @@ def _collect_stem_candidates(values: Sequence[str]) -> List[str]:
         s = normalize_text(v)
         if not s:
             continue
-
         a = s.lower()
         b = to_file_name_like(s).lower()
         c = Path(to_file_name_like(s)).stem.lower()
@@ -360,12 +345,10 @@ def match_file_from_folder(
     stem_keys = _collect_stem_candidates(match_values)
     norm_keys = _collect_norm_candidates(match_values)
 
-    # 1) rank exact match (most reliable when file names have rank prefix)
     rank_matches = idx.by_rank.get(rank, []) if rank is not None else []
     if len(rank_matches) == 1:
         return rank_matches[0], f"rank={rank}"
 
-    # rank + norm disambiguation
     if len(rank_matches) > 1 and norm_keys:
         filtered = []
         for p in rank_matches:
@@ -376,7 +359,6 @@ def match_file_from_folder(
         if len(filtered) == 1:
             return filtered[0], f"rank+norm={rank}/{norm_keys[0]}"
 
-    # 2) exact stem candidates
     stem_hits: List[Path] = []
     for k in stem_keys:
         stem_hits.extend(idx.by_stem.get(k, []))
@@ -384,7 +366,6 @@ def match_file_from_folder(
     if len(stem_hits) == 1:
         return stem_hits[0], f"stem={stem_keys[0] if stem_keys else ''}"
 
-    # 3) normalized exact candidates
     norm_hits: List[Path] = []
     for k in norm_keys:
         norm_hits.extend(idx.by_norm.get(k, []))
@@ -392,7 +373,6 @@ def match_file_from_folder(
     if len(norm_hits) == 1:
         return norm_hits[0], f"norm={norm_keys[0] if norm_keys else ''}"
 
-    # 4) optional fuzzy contains matching
     if allow_fuzzy and norm_keys:
         fuzzy_hits: List[Path] = []
         for p in idx.files:
@@ -405,7 +385,6 @@ def match_file_from_folder(
         if len(fuzzy_hits) == 1:
             return fuzzy_hits[0], f"fuzzy={norm_keys[0]}"
 
-    # final error detail
     debug = {
         "rank": rank,
         "stem_keys": stem_keys[:5],
@@ -415,6 +394,37 @@ def match_file_from_folder(
         "norm_candidates": [p.name for p in norm_hits[:5]],
     }
     raise SimbaError(f"文件夹匹配失败或不唯一: {json.dumps(debug, ensure_ascii=False)}")
+
+
+def sort_files_for_table(files: Sequence[Path]) -> List[Path]:
+    def k(p: Path):
+        rank = parse_rank_prefix(p.stem)
+        if rank is None:
+            return (1, 999999, p.name.lower())
+        return (0, rank, p.name.lower())
+
+    return sorted(files, key=k)
+
+
+def create_workbook_from_folder(image_dir: Path, sheet_name: str, rank_col_name: str, match_col_name: str, source_col_name: str):
+    idx = build_folder_index(image_dir)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+
+    ws.cell(1, 1, rank_col_name)
+    ws.cell(1, 2, match_col_name)
+    ws.cell(1, 3, source_col_name)
+
+    files = sort_files_for_table(idx.files)
+    for i, p in enumerate(files, start=2):
+        rank = parse_rank_prefix(p.stem)
+        match_name = re.sub(r"^\s*0*\d+[_\-\s]+", "", p.stem).strip() or p.stem
+        ws.cell(i, 1, rank if rank is not None else "")
+        ws.cell(i, 2, match_name)
+        ws.cell(i, 3, str(p))
+
+    return wb, ws, idx
 
 
 @dataclass
@@ -540,14 +550,24 @@ class SimbaClient:
         return url
 
 
-def default_output_path(input_path: Path) -> Path:
+def default_output_path(input_path: Optional[Path], mode: str, image_dir: Optional[Path]) -> Path:
+    if mode == "folder-match" and image_dir:
+        if input_path:
+            stem = input_path.stem + "_simba已回填"
+        else:
+            stem = "Simba图片上传回填结果"
+        return image_dir / f"{stem}.xlsx"
+
+    if input_path is None:
+        raise SimbaError("source-col 模式必须提供 --input")
+
     stem = input_path.stem + "_simba已回填"
     return input_path.with_name(stem + input_path.suffix)
 
 
 def setup_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="上传图片到 Simba 并回填 Excel")
-    p.add_argument("--input", required=True, help="输入Excel路径")
+    p.add_argument("--input", help="输入Excel路径。folder-match模式可不填：自动在图片目录生成表格")
     p.add_argument("--output", help="输出Excel路径，不填则自动生成")
     p.add_argument("--sheet", default="替代游戏总表", help="工作表名称")
 
@@ -580,36 +600,60 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     if not token:
         raise SimbaError("未提供 token")
 
-    in_path = Path(args.input).expanduser().resolve()
-    if not in_path.exists():
-        raise SimbaError(f"输入文件不存在: {in_path}")
-    out_path = Path(args.output).expanduser().resolve() if args.output else default_output_path(in_path)
+    image_dir = Path(args.image_dir).expanduser().resolve() if args.image_dir else None
+    if args.mode == "folder-match" and image_dir is None:
+        raise SimbaError("folder-match 模式必须提供 --image-dir")
 
-    wb = openpyxl.load_workbook(in_path)
-    if args.sheet not in wb.sheetnames:
-        raise SimbaError(f"工作表不存在: {args.sheet}, 当前={wb.sheetnames}")
-    ws = wb[args.sheet]
+    auto_generated_table = False
+    in_path: Optional[Path]
+    folder_idx: Optional[FolderIndex] = None
 
+    if args.input:
+        in_path = Path(args.input).expanduser().resolve()
+        if not in_path.exists():
+            raise SimbaError(f"输入文件不存在: {in_path}")
+        wb = openpyxl.load_workbook(in_path)
+        if args.sheet not in wb.sheetnames:
+            raise SimbaError(f"工作表不存在: {args.sheet}, 当前={wb.sheetnames}")
+        ws = wb[args.sheet]
+    else:
+        if args.mode != "folder-match":
+            raise SimbaError("source-col 模式必须提供 --input")
+        if image_dir is None:
+            raise SimbaError("缺少图片目录")
+        wb, ws, folder_idx = create_workbook_from_folder(
+            image_dir=image_dir,
+            sheet_name=args.sheet,
+            rank_col_name=args.rank_col,
+            match_col_name=args.match_col,
+            source_col_name=args.source_col,
+        )
+        auto_generated_table = True
+        in_path = None
+        print(f"[INFO] 已自动生成待回填表格（内存）: sheet={args.sheet}")
+
+    out_path = Path(args.output).expanduser().resolve() if args.output else default_output_path(in_path, args.mode, image_dir)
+
+    create_missing_cols = auto_generated_table
     url_col = resolve_or_create_column(ws, args.url_col, "url-col", create_if_missing=True)
     key_col = resolve_or_create_column(ws, args.key_col, "key-col", create_if_missing=True)
-    remark_col = resolve_or_create_column(ws, args.remark_col, "remark-col", create_if_missing=False)
+    remark_col = resolve_or_create_column(ws, args.remark_col, "remark-col", create_if_missing=create_missing_cols)
 
-    source_col = None
+    source_col = resolve_or_create_column(ws, args.source_col, "source-col", create_if_missing=create_missing_cols)
+
     match_col = None
     rank_col = None
-    folder_idx = None
-
-    if args.mode == "source-col":
-        source_col = resolve_or_create_column(ws, args.source_col, "source-col", create_if_missing=False)
-    else:
-        if not args.image_dir:
-            raise SimbaError("folder-match 模式必须提供 --image-dir")
-        image_dir = Path(args.image_dir).expanduser().resolve()
-        folder_idx = build_folder_index(image_dir)
-        match_col = resolve_or_create_column(ws, args.match_col, "match-col", create_if_missing=False)
-        rank_col = resolve_or_create_column(ws, args.rank_col, "rank-col", create_if_missing=False)
-        source_col = resolve_or_create_column(ws, args.source_col, "source-col", create_if_missing=False)
+    if args.mode == "folder-match":
+        match_col = resolve_or_create_column(ws, args.match_col, "match-col", create_if_missing=create_missing_cols)
+        rank_col = resolve_or_create_column(ws, args.rank_col, "rank-col", create_if_missing=create_missing_cols)
+        if folder_idx is None:
+            folder_idx = build_folder_index(image_dir)
         print(f"[INFO] folder-match 已加载图片: {len(folder_idx.files)} 张")
+
+    if args.mode == "folder-match" and match_col is not None:
+        for r in range(args.start_row, ws.max_row + 1):
+            if not cell_string(ws.cell(r, remark_col)):
+                ws.cell(r, remark_col, cell_display_string(ws.cell(r, match_col)))
 
     client = SimbaClient(token=token)
 
@@ -639,34 +683,44 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 continue
             total_seen += 1
         else:
-            # folder-match mode
-            row_match_values = [
-                cell_display_string(ws.cell(r, match_col)),
-                cell_string(ws.cell(r, match_col)),
-                cell_display_string(ws.cell(r, source_col)),
-                cell_string(ws.cell(r, source_col)),
-            ]
-            if not any(normalize_text(v) for v in row_match_values):
-                continue
-            total_seen += 1
-            rank_value = cell_display_string(ws.cell(r, rank_col))
-            try:
-                matched_file, reason = match_file_from_folder(
-                    idx=folder_idx,
-                    match_values=row_match_values,
-                    rank_value=rank_value,
-                    allow_fuzzy=args.allow_fuzzy,
-                )
-                src = str(matched_file)
-                match_debug = reason
-            except Exception as e:
-                failed += 1
-                err = f"row={r}, rank={rank_value}, match={normalize_text(row_match_values[0])}, error={e}"
-                errors.append(err)
-                print(f"[FAIL] {err}")
-                continue
+            if auto_generated_table:
+                src = cell_string(ws.cell(r, source_col))
+                if not src:
+                    continue
+                total_seen += 1
+                match_debug = "auto-table"
+            else:
+                row_match_values = [
+                    cell_display_string(ws.cell(r, match_col)),
+                    cell_string(ws.cell(r, match_col)),
+                    cell_display_string(ws.cell(r, source_col)),
+                    cell_string(ws.cell(r, source_col)),
+                ]
+                if not any(normalize_text(v) for v in row_match_values):
+                    continue
+                total_seen += 1
+                rank_value = cell_display_string(ws.cell(r, rank_col))
+                try:
+                    matched_file, reason = match_file_from_folder(
+                        idx=folder_idx,
+                        match_values=row_match_values,
+                        rank_value=rank_value,
+                        allow_fuzzy=args.allow_fuzzy,
+                    )
+                    src = str(matched_file)
+                    match_debug = reason
+                except Exception as e:
+                    failed += 1
+                    err = f"row={r}, rank={rank_value}, match={normalize_text(row_match_values[0])}, error={e}"
+                    errors.append(err)
+                    print(f"[FAIL] {err}")
+                    continue
 
-        remark = cell_string(ws.cell(r, remark_col)) or f"row-{r}"
+        remark = cell_string(ws.cell(r, remark_col))
+        if not remark and args.mode == "folder-match" and match_col is not None:
+            remark = cell_display_string(ws.cell(r, match_col))
+        if not remark:
+            remark = f"row-{r}"
 
         try:
             img, ext = read_image_bytes(src, timeout=args.timeout)
@@ -690,14 +744,15 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
 
     log_path = Path(args.log).expanduser().resolve() if args.log else out_path.with_name(out_path.stem + "_upload日志.txt")
     with log_path.open("w", encoding="utf-8") as f:
-        f.write(f"输入文件: {in_path}\n")
+        f.write(f"输入文件: {in_path if in_path else '自动生成'}\n")
         f.write(f"输出文件: {out_path}\n")
         f.write(f"工作表: {args.sheet}\n")
         f.write(f"模式: {args.mode}\n")
         f.write(f"来源列: {args.source_col}, 匹配列: {args.match_col}, 排名列: {args.rank_col}\n")
-        if args.image_dir:
-            f.write(f"图片目录: {Path(args.image_dir).expanduser().resolve()}\n")
+        if image_dir:
+            f.write(f"图片目录: {image_dir}\n")
         f.write(f"链接列: {args.url_col}, Key列: {args.key_col}, 备注列: {args.remark_col}\n")
+        f.write(f"自动生成表格: {auto_generated_table}\n")
         f.write(f"扫描条目: {total_seen}\n")
         f.write(f"成功: {success}\n")
         f.write(f"失败: {failed}\n")
@@ -708,10 +763,11 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 f.write(f"- {e}\n")
 
     summary = {
-        "input": str(in_path),
+        "input": str(in_path) if in_path else "自动生成",
         "output": str(out_path),
         "sheet": args.sheet,
         "mode": args.mode,
+        "auto_generated_table": auto_generated_table,
         "scanned": total_seen,
         "success": success,
         "failed": failed,

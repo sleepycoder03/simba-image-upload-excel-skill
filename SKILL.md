@@ -3,6 +3,7 @@ name: simba-image-upload-excel
 description: |
   将 Excel 中的图片（URL 或本地路径）批量上传到 Simba 后台，并把 Simba 生成的图片链接和素材 key 回填到表格。
   支持两种模式：按“图片来源列”直接上传，或“上传文件夹图片并按文件名匹配回填”。
+  folder-match 模式下如不提供输入Excel，会自动在图片文件夹目录生成并回填表格。
   每次执行前必须向用户索取当次 token，且不得复用旧 token。
 ---
 
@@ -42,7 +43,7 @@ description: |
   --remark-col "替代游戏"
 ```
 
-### B) 上传文件夹并按文件名匹配回填（folder-match）
+### B) 上传文件夹并按文件名匹配回填（folder-match，已有Excel）
 ```bash
 /Users/macbook2/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 \
   /Users/macbook2/.codex/skills/simba-image-upload-excel/scripts/simba_excel_upload.py \
@@ -56,6 +57,17 @@ description: |
   --key-col "Simba素材Key" \
   --remark-col "替代游戏"
 ```
+
+### C) 上传文件夹并自动生成/回填表格（folder-match，无输入Excel）
+```bash
+/Users/macbook2/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 \
+  /Users/macbook2/.codex/skills/simba-image-upload-excel/scripts/simba_excel_upload.py \
+  --mode folder-match \
+  --image-dir "<图片文件夹绝对路径>" \
+  --sheet "替代游戏总表"
+```
+
+> C模式会自动在**图片文件夹目录**生成输出Excel，并把 Simba 链接回填进去。
 
 > 不传 `--token` 时脚本会交互提示输入 token（推荐）。
 
